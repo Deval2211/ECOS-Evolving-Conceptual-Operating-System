@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ECOS — CRS v0.1 + Language Adapter &amp; Phases 2–5</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header>
+  <div>
+    <strong>ECOS — Concept Representation System (CRS) v0.1</strong>
+    <div class="subtitle">
+      Language Adapter • Phase 1 (CRS) • Phase 2 (Reasoning) • Phase 3 (Supervisor) • Phases 4–5 (Evolution)
+    </div>
+  </div>
+  <span class="tag ok">Prototype Online</span>
+</header>
+
+<main>
+  <div id="stats" class="stats"></div>
+
+  <div class="card">
+    <h2>0. Language Adapter: Sentence Ingestion &amp; Q&amp;A (Sections 48 &amp; 74)</h2>
+    <p class="hint">
+      Separate front-end adapter parses natural text into structured CRS claims via <code>LANGUAGE_ADAPTER</code>
+      (uses offline rule mode by default; can switch to <code>ollama</code> or <code>gemini</code>).
+    </p>
+    <div class="row">
+      <input id="nlpSentence" value="Witness A says Aarav is in Ahmedabad" style="min-width: 320px;" />
+      <select id="nlpMode">
+        <option value="rule">Mode: Offline Rule Parser (Zero Setup)</option>
+        <option value="ollama">Mode: Local Ollama (with rule fallback)</option>
+        <option value="gemini">Mode: Gemini API (with rule fallback)</option>
+      </select>
+      <button class="primary" onclick="ingestSentence()">Parse &amp; Write to CRS</button>
+    </div>
+    <div id="ingestMsg"></div>
+
+    <h3>Ask a Question Against CRS</h3>
+    <div class="row">
+      <input id="nlpAsk" value="કાર" placeholder="Ask about an entity or concept (EN / HI / GU)..." style="min-width: 320px;" />
+      <button onclick="askQuestion()">Query CRS</button>
+    </div>
+    <div id="askMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>1. Multilingual Concept Lookup (Section 4.1 &amp; 84)</h2>
+    <div class="row">
+      <input id="qConcept" placeholder="Search: car, પાણી, java, planet, AI..." style="min-width: 250px;" />
+      <button class="primary" onclick="loadConcepts()">Search</button>
+      <button onclick="quickConcept('કાર')">Gujarati: કાર</button>
+      <button onclick="quickConcept('પાણી')">Gujarati: પાણી</button>
+      <button onclick="quickConcept('java')">Polysemy: java</button>
+      <button onclick="quickConcept('planet')">Evolution: planet</button>
+      <button onclick="quickConcept('')">Show All</button>
+    </div>
+    <div id="conceptBox"></div>
+  </div>
+
+  <div class="card">
+    <h2>2. Time-Travel Query (Section 28)</h2>
+    <div class="row">
+      <select id="tSubj"></select>
+      <input id="tDate" type="date" value="2026-03-15" />
+      <button class="primary" onclick="loadTemporal()">Query Valid State</button>
+      <button onclick="quickTemporal('ent_car_001', '2026-03-15')">Car: Mar 2026</button>
+      <button onclick="quickTemporal('ent_car_001', '2026-08-15')">Car: Aug 2026</button>
+      <button onclick="quickTemporal('ent_pluto', '1995-01-01')">Pluto: 1995</button>
+      <button onclick="quickTemporal('ent_pluto', '2026-08-15')">Pluto: 2026</button>
+    </div>
+    <div id="tempBox"></div>
+  </div>
+
+  <div class="card">
+    <h2>3. Phase 2: Reasoning Engine (Section 69)</h2>
+    <p class="hint">
+      Runs outside CRS as <code>REASONING_ENGINE</code>: inherits defaults/exceptions,
+      derives rule-based claims with provenance, and scans for overlapping contradictions.
+    </p>
+    <div class="row">
+      <button class="reason-btn" onclick="runReasoning()">Run Reasoning Engine</button>
+    </div>
+    <div id="reasonMsg"></div>
+    <div id="inferredBox"></div>
+  </div>
+
+  <div class="card">
+    <h2>4. Phase 3: Cognitive Supervisor (Section 70)</h2>
+    <p class="hint">
+      Evaluates source reliability, triages contradictions without deleting claims,
+      flags critical <code>UNKNOWN</code> safety gaps, and spots fragile inferences.
+    </p>
+    <div class="row">
+      <button class="primary" onclick="runSupervisor()">Run Cognitive Supervisor</button>
+    </div>
+    <div id="supervisorMsg"></div>
+    <div id="supervisorBox"></div>
+  </div>
+
+  <div class="card">
+    <h2>5. Phases 4 &amp; 5: Learning &amp; Non-Destructive Concept Evolution (Sections 71–72)</h2>
+    <p class="hint">
+      Learns multi-claim entity profiles and performs non-destructive <code>REFINE</code> /
+      <code>SPLIT</code> concept evolution with full lineage edges.
+    </p>
+    <div class="row">
+      <button class="reason-btn" onclick="runEvolution()">Run Learning &amp; Evolution</button>
+    </div>
+    <div id="evolutionMsg"></div>
+    <div id="evolutionBox"></div>
+  </div>
+
+  <div class="card">
+    <h2>6. Contradictions, Unknown State, Provenance &amp; Evolution Lineage</h2>
+    <div id="overviewBox"></div>
+  </div>
+
+  <div class="card">
+    <h2>7. Add New Concept or Entity Live</h2>
+    <h3>Add Language-Independent Concept</h3>
+    <div class="row">
+      <input id="cId" placeholder="ID (e.g. concept_book)" />
+      <input id="cCanon" placeholder="Canonical (e.g. BOOK)" />
+      <input id="cEn" placeholder="English labels (comma-sep)" />
+      <input id="cHi" placeholder="Hindi (optional)" />
+      <input id="cGu" placeholder="Gujarati (optional)" />
+      <button class="primary" onclick="addConcept()">Add Concept</button>
+    </div>
+    <h3>Add Entity Instance</h3>
+    <div class="row">
+      <input id="eId" placeholder="Entity ID (e.g. ent_penguin)" />
+      <select id="eConcept"></select>
+      <input id="eLabel" placeholder="Display Name (e.g. Penguin)" />
+      <button class="primary" onclick="addEntity()">Add Entity</button>
+    </div>
+    <div id="createMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>8. Live Claim Write &amp; Invariant / Auth Guard (Sections 60 &amp; 87)</h2>
+    <div class="row">
+      <select id="wActor">
+        <option value="LANGUAGE_ADAPTER">Actor: LANGUAGE_ADAPTER (Allowed)</option>
+        <option value="COGNITIVE_SUPERVISOR">Actor: COGNITIVE_SUPERVISOR (Allowed)</option>
+        <option value="AEE">Actor: AEE (BLOCKED by Invariant 13)</option>
+      </select>
+      <select id="wSubj"></select>
+      <input id="wRel" value="location" />
+      <input id="wVal" value="Ahmedabad" />
+      <select id="wState">
+        <option>REPORTED</option>
+        <option>OBSERVED</option>
+        <option>HYPOTHESIZED</option>
+        <option>UNKNOWN</option>
+      </select>
+      <select id="wPol">
+        <option>POSITIVE</option>
+        <option>NEGATIVE</option>
+        <option>UNKNOWN</option>
+      </select>
+      <button class="primary" onclick="submitClaim()">Write Claim</button>
+    </div>
+    <div id="writeMsg"></div>
+  </div>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
