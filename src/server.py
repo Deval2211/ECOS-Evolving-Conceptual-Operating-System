@@ -1,4 +1,6 @@
 import json
+import os
+import re
 import uuid
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +17,7 @@ from seed import build_demo_crs
 from supervisor import CognitiveSupervisor
 
 STATIC_DIR = Path(__file__).parent / "static"
+ENV_FILE = Path(__file__).parent / ".env"
 STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/static/style.css": ("style.css", "text/css; charset=utf-8"),
@@ -22,7 +25,37 @@ STATIC_FILES = {
 }
 
 
+def _load_dotenv(path: Path = ENV_FILE) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return
+
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+
+        value = value.strip()
+        if value[:1] in ("'", '"'):
+            quote = value[0]
+            closing_quote = value.find(quote, 1)
+            if closing_quote >= 0:
+                value = value[1:closing_quote]
+        else:
+            value = value.split("#", 1)[0].rstrip()
+        os.environ.setdefault(key, value)
+
+
 def run_server(port: int = 8080) -> None:
+    _load_dotenv()
     crs = build_demo_crs(db_path="ecos_crs.db")
     load_extended_data(crs)
     reasoner = ReasoningEngine(crs)
@@ -108,7 +141,15 @@ def run_server(port: int = 8080) -> None:
         def do_POST(self) -> None:
             try:
                 data = self._read_body()
-                if self.path == "/api/ingest":
+                if self.path == "/api/chat":
+                    message = data.get("message", "")
+                    if not isinstance(message, str):
+                        raise ValueError("Message must be a string.")
+                    history = data.get("history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    self._json(200, adapter.chat(message, history))
+                elif self.path == "/api/ingest":
                     result = adapter.ingest_sentence(
                         sentence=data.get("sentence", ""),
                         mode=data.get("mode", "rule"),
@@ -155,6 +196,8 @@ def run_server(port: int = 8080) -> None:
                 self._json(403, {"error": str(exc)})
             except (CRSError, ValueError, KeyError) as exc:
                 self._json(400, {"error": str(exc)})
+            except RuntimeError as exc:
+                self._json(503, {"error": str(exc)})
 
     print(f"[ECOS-CRS] Web Explorer running at http://127.0.0.1:{port} (Ctrl+C to stop)")
     ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

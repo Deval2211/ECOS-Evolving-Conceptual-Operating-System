@@ -1,9 +1,18 @@
+import json
+import os
 import unittest
+from io import BytesIO
 from datetime import date
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
+from urllib.error import HTTPError
 
 from engine import CRSAuthError, CRSInvariantError
 from evolution import ConceptEvolutionEngine
 from extra_data import load_extended_data
+from language_adapter import LanguageAdapter
+from server import _load_dotenv
 from models import ActorRole, Claim, Entity, EpistemicState, Polarity
 from reasoning import ReasoningEngine
 from seed import build_demo_crs
@@ -125,6 +134,80 @@ class TestECOSCRS(unittest.TestCase):
         ]
         self.assertEqual(len(safety_alerts), 1)
         self.assertEqual(safety_alerts[0]["priority"], "HIGH_SAFETY")
+
+    def test_dotenv_loads_values_without_overriding_shell_environment(self) -> None:
+        with TemporaryDirectory() as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text(
+                "GROQ_API_KEY='test-placeholder'\n"
+                "GROQ_MODEL=qwen/qwen3.8-27b # model\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"GROQ_MODEL": "shell-model"}):
+                os.environ.pop("GROQ_API_KEY", None)
+                _load_dotenv(env_file)
+                self.assertEqual(os.environ["GROQ_API_KEY"], "test-placeholder")
+                self.assertEqual(os.environ["GROQ_MODEL"], "shell-model")
+
+    def test_chat_extracts_and_deduplicates_concepts_and_entities(self) -> None:
+        extracted = {
+            "reply": "Ada Lovelace was a mathematician.",
+            "concepts": [{"canonical": "MATHEMATICIAN", "labels": ["mathematician"]}],
+            "entities": [{"name": "Ada Lovelace", "concept": "MATHEMATICIAN"}],
+        }
+        api_response = {
+            "choices": [{"message": {"content": json.dumps(extracted)}}]
+        }
+        first_message = "Tell me about Ada Lovelace, a mathematician."
+
+        with patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}):
+            with patch(
+                "language_adapter.urllib.request.urlopen",
+                side_effect=[
+                    BytesIO(json.dumps(api_response).encode("utf-8")),
+                    BytesIO(json.dumps(api_response).encode("utf-8")),
+                ],
+            ) as urlopen:
+                adapter = LanguageAdapter(self.crs)
+                first = adapter.chat(first_message)
+                second = adapter.chat(
+                    "Can you tell me more?",
+                    [
+                        {"role": "user", "content": first_message},
+                        {"role": "assistant", "content": first["reply"]},
+                    ],
+                )
+
+        concept_id = first["added"]["concepts"][0]["id"]
+        entity_id = first["added"]["entities"][0]["id"]
+        self.assertEqual(self.crs.entities[entity_id].concept_id, concept_id)
+        self.assertEqual(second["added"], {"concepts": [], "entities": []})
+        sent_body = json.loads(urlopen.call_args_list[1].args[0].data)
+        self.assertEqual(sent_body["messages"][-3]["content"], first_message)
+
+    def test_chat_redacts_api_key_from_provider_errors(self) -> None:
+        api_key = "test-secret-key"
+        error_body = json.dumps(
+            {"error": {"message": f"Invalid credential {api_key}"}}
+        ).encode("utf-8")
+        provider_error = HTTPError(
+            "https://api.groq.com/openai/v1/chat/completions",
+            400,
+            "Bad Request",
+            {},
+            BytesIO(error_body),
+        )
+
+        with patch.dict("os.environ", {"GROQ_API_KEY": api_key}):
+            with patch(
+                "language_adapter.urllib.request.urlopen",
+                side_effect=provider_error,
+            ):
+                with self.assertRaises(RuntimeError) as raised:
+                    LanguageAdapter(self.crs).chat("Hello")
+
+        self.assertIn("Invalid credential [redacted]", str(raised.exception))
+        self.assertNotIn(api_key, str(raised.exception))
 
     def test_13_concept_evolution_learns_and_splits_polysemy(self) -> None:
         load_extended_data(self.crs)

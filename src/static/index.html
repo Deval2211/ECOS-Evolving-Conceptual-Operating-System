@@ -3,207 +3,150 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ECOS-CRS // Epistemic Knowledge Workbench</title>
+  <title>ECOS-CRS // Knowledge Graph Explorer</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
-      <span class="brand-tag">CRS v0.1</span>
-      <h1>Epistemic Knowledge Workbench</h1>
+      <div class="brand-icon">◈</div>
+      <div>
+        <div class="brand-title">Knowledge Graph Explorer</div>
+        <div class="brand-sub">ECOS-CRS · CONTEXT &amp; EPISTEMIC GRAPH</div>
+      </div>
     </div>
-    <div class="pipeline-actions">
-      <button class="btn btn-secondary" onclick="triggerEngine('/api/reason', this)">Run Reasoner</button>
-      <button class="btn btn-secondary" onclick="triggerEngine('/api/supervise', this)">Audit Supervisor</button>
-      <button class="btn btn-secondary" onclick="triggerEngine('/api/evolve', this)">Evolve Concepts</button>
-      <button class="btn btn-primary" onclick="loadOverview()">Refresh</button>
+
+    <div class="topbar-actions">
+      <button class="btn btn-ghost" onclick="runAction('/api/reason', 'Reasoner')">Reason</button>
+      <button class="btn btn-ghost" onclick="runAction('/api/supervise', 'Supervisor')">Supervise</button>
+      <button class="btn btn-ghost" onclick="runAction('/api/evolve', 'Evolution')">Evolve</button>
+      <div class="graph-counter" id="graph-counter">0 nodes · 0 edges</div>
     </div>
   </header>
 
-  <section class="telemetry-strip" id="stats-bar">
-    <!-- Populated by app.js -->
-  </section>
+  <div class="shell">
+    <aside class="left-rail">
+      <div class="rail-section">
+        <div class="rail-title">Search</div>
+        <input type="text" id="search-input" class="input" placeholder="Search nodes, relations, labels..." oninput="applyFilters()" />
+      </div>
 
-  <div id="toast" class="toast hidden"></div>
-
-  <main class="workspace">
-    <!-- Left Column: Query & Ingestion Controls -->
-    <aside class="sidebar">
-      <div class="panel">
-        <div class="panel-header">
-          <h2>Natural Language Query</h2>
-          <span class="mono-hint">GET /api/ask</span>
-        </div>
-        <div class="panel-body">
-          <div class="input-group">
-            <input type="text" id="ask-input" placeholder="e.g., What is Pluto? or Aarav diagnosis" />
-            <button class="btn btn-primary" onclick="askCRS()">Query</button>
-          </div>
-          <pre id="ask-result" class="console-out">Ready for query...</pre>
+      <div class="rail-section">
+        <div class="rail-title">Node Types</div>
+        <div class="chip-grid" id="type-filters">
+          <button class="chip active" data-type="concept" onclick="toggleType('concept', this)">
+            <span class="dot dot-concept"></span>Concept
+          </button>
+          <button class="chip active" data-type="entity" onclick="toggleType('entity', this)">
+            <span class="dot dot-entity"></span>Entity
+          </button>
+          <button class="chip active" data-type="event" onclick="toggleType('event', this)">
+            <span class="dot dot-event"></span>Event
+          </button>
+          <button class="chip active" data-type="claim" onclick="toggleType('claim', this)">
+            <span class="dot dot-claim"></span>Claim
+          </button>
         </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-header">
-          <h2>Claim Ingestion</h2>
-          <span class="mono-hint">POST /api/ingest</span>
-        </div>
-        <div class="panel-body">
-          <textarea id="ingest-input" rows="2" placeholder="Enter statement to parse into CRS claims..."></textarea>
-          <div class="row-between mt-8">
-            <select id="ingest-mode">
-              <option value="rule">Mode: Rule Adapter</option>
-              <option value="llm">Mode: LLM Adapter</option>
-            </select>
-            <button class="btn btn-primary" onclick="ingestSentence()">Ingest</button>
-          </div>
+      <div class="rail-section">
+        <div class="rail-title">Layout</div>
+        <div class="layout-grid">
+          <button class="layout-btn active" data-layout="force" onclick="setLayout('force', this)">Force</button>
+          <button class="layout-btn" data-layout="circle" onclick="setLayout('circle', this)">Circle</button>
+          <button class="layout-btn" data-layout="grid" onclick="setLayout('grid', this)">Grid</button>
         </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-header">
-          <h2>Temporal State Inspector</h2>
-          <span class="mono-hint">GET /api/temporal</span>
+      <div class="rail-section">
+        <div class="rail-title">Ask Graph</div>
+        <div class="row-gap">
+          <input type="text" id="ask-input" class="input" placeholder="Ask about CRS state..." onkeydown="if(event.key==='Enter') askGraph()" />
+          <button class="btn btn-accent" onclick="askGraph()">Ask</button>
         </div>
-        <div class="panel-body">
-          <div class="form-grid">
-            <label>Subject ID
-              <input type="text" id="temp-subject" value="ent_pluto" />
-            </label>
-            <label>Valid On Date
-              <input type="date" id="temp-date" value="2005-06-01" />
-            </label>
-          </div>
-          <button class="btn btn-secondary full-width mt-8" onclick="queryTemporal()">Inspect Time Slice</button>
-          <div id="temporal-result" class="list-stack mt-8"></div>
+        <div id="ask-box" class="mini-out hidden"></div>
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-title">Ingest Statement</div>
+        <textarea id="ingest-input" class="textarea" rows="2" placeholder="Add statement to CRS..."></textarea>
+        <div class="row-gap mt-6">
+          <select id="ingest-mode" class="select">
+            <option value="rule">Rule</option>
+            <option value="llm">LLM</option>
+          </select>
+          <button class="btn btn-accent" onclick="ingestText()">Ingest</button>
         </div>
       </div>
     </aside>
 
-    <!-- Right Column: Structured Data Views -->
-    <section class="main-canvas">
-      <nav class="tabs">
-        <button class="tab active" data-tab="epistemic" onclick="switchTab('epistemic', this)">Epistemic Triage & Unknowns</button>
-        <button class="tab" data-tab="concepts" onclick="switchTab('concepts', this)">Concepts & Lineage</button>
-        <button class="tab" data-tab="inferences" onclick="switchTab('inferences', this)">Derived & Learned Claims</button>
-      </nav>
+    <main class="canvas-wrap">
+      <svg id="graph-svg" viewBox="0 0 1200 760" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#6b7280" />
+          </marker>
+          <marker id="arrow-conflict" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#ef4444" />
+          </marker>
+        </defs>
+        <g id="edges-layer"></g>
+        <g id="edge-labels-layer"></g>
+        <g id="nodes-layer"></g>
+      </svg>
 
-      <!-- Tab 1: Contradictions & Safety Unknowns -->
-      <div id="tab-epistemic" class="tab-pane active">
-        <div class="grid-2">
-          <div class="panel">
-            <div class="panel-header">
-              <h2>Preserved Contradictions</h2>
-              <span class="badge badge-warn" id="contra-count">0</span>
-            </div>
-            <div class="panel-body" id="contradictions-list"></div>
-          </div>
+      <div class="canvas-controls">
+        <button class="icon-btn" title="Zoom In" onclick="zoomBy(1.15)">+</button>
+        <button class="icon-btn" title="Zoom Out" onclick="zoomBy(0.87)">−</button>
+        <button class="icon-btn" title="Reset View" onclick="resetZoom()">⟲</button>
+      </div>
 
-          <div class="panel">
-            <div class="panel-header">
-              <h2>Epistemic Unknowns (Invariant 2)</h2>
-              <span class="badge badge-danger" id="unknown-count">0</span>
-            </div>
-            <div class="panel-body" id="unknowns-list"></div>
-          </div>
+      <div id="status-toast" class="toast hidden"></div>
+    </main>
+
+    <aside class="right-rail">
+      <div class="rail-section details-panel">
+        <div class="rail-title-row">
+          <span class="rail-title">Details</span>
+          <button class="btn-link" onclick="clearSelection()">Clear</button>
         </div>
-
-        <div class="panel mt-16">
-          <div class="panel-header">
-            <h2>Provenance Chain Trace (inf_01)</h2>
-            <span class="mono-hint">Source &rarr; Observation &rarr; Claim &rarr; Inference</span>
-          </div>
-          <div class="panel-body" id="provenance-chain"></div>
+        <div id="details-content" class="details-empty">
+          Click any node or edge to inspect properties, connections, and epistemic state.
         </div>
       </div>
 
-      <!-- Tab 2: Concepts & Lineage -->
-      <div id="tab-concepts" class="tab-pane">
-        <div class="panel">
-          <div class="panel-header">
-            <h2>Concept Registry</h2>
-            <input type="text" id="concept-filter" class="inline-search" placeholder="Filter by ID, English, Hindi, Gujarati..." oninput="filterConcepts()" />
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Concept ID</th>
-                  <th>Canonical</th>
-                  <th>Ver</th>
-                  <th>Multilingual Labels</th>
-                  <th>Defaults / Exceptions</th>
-                </tr>
-              </thead>
-              <tbody id="concepts-tbody"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div class="panel mt-16">
-          <div class="panel-header">
-            <h2>Non-Destructive Concept Lineage</h2>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>From</th>
-                  <th>Operation</th>
-                  <th>To</th>
-                  <th>Reason</th>
-                </tr>
-              </thead>
-              <tbody id="lineage-tbody"></tbody>
-            </table>
-          </div>
+      <div class="rail-section legend-panel">
+        <div class="rail-title">Legend</div>
+        <div class="legend-list">
+          <div class="legend-item"><span class="shape diamond"></span> Concept</div>
+          <div class="legend-item"><span class="shape circle"></span> Entity</div>
+          <div class="legend-item"><span class="shape star"></span> Event</div>
+          <div class="legend-item"><span class="shape square"></span> Claim / Inference</div>
+          <div class="legend-item"><span class="line-sample membership"></span> Entity to Concept (instance_of)</div>
+          <div class="legend-item"><span class="line-sample solid"></span> Relation / Lineage</div>
+          <div class="legend-item"><span class="line-sample dashed"></span> Contradiction / Link</div>
         </div>
       </div>
 
-      <!-- Tab 3: Inferred & Learned Claims -->
-      <div id="tab-inferences" class="tab-pane">
-        <div class="panel">
-          <div class="panel-header">
-            <h2>Inferred Claims (Reasoning Engine)</h2>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Claim ID</th>
-                  <th>Subject</th>
-                  <th>Relation</th>
-                  <th>Value</th>
-                  <th>Provenance Trace</th>
-                </tr>
-              </thead>
-              <tbody id="inferred-tbody"></tbody>
-            </table>
+      <section class="rail-section chat-panel" aria-label="Chat with Qwen">
+        <div class="rail-title-row">
+          <span class="rail-title">Chat with Qwen</span>
+          <span class="chat-model">QWEN 3.8</span>
+        </div>
+        <div id="chat-messages" class="chat-messages" aria-live="polite">
+          <div class="chat-message assistant">
+            <div class="chat-role">Qwen</div>
+            <div class="chat-copy">Hi. What would you like to explore?</div>
           </div>
         </div>
-
-        <div class="panel mt-16">
-          <div class="panel-header">
-            <h2>Learned Patterns (Concept Evolution Engine)</h2>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Claim ID</th>
-                  <th>Subject</th>
-                  <th>Relation</th>
-                  <th>Value</th>
-                  <th>State</th>
-                </tr>
-              </thead>
-              <tbody id="learned-tbody"></tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </section>
-  </main>
+        <form id="chat-form" class="chat-composer" onsubmit="sendChat(event)">
+          <textarea id="chat-input" class="textarea" rows="2" maxlength="4000" placeholder="Write a message..." required></textarea>
+          <button id="chat-send" class="btn btn-accent" type="submit">Send</button>
+        </form>
+        <div id="chat-status" class="chat-status" role="status"></div>
+      </section>
+    </aside>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>
