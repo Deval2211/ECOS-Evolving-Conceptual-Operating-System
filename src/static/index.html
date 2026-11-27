@@ -1,171 +1,153 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ECOS — CRS v0.1 + Language Adapter &amp; Phases 2–5</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ECOS-CRS // Knowledge Graph Explorer</title>
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-<header>
-  <div>
-    <strong>ECOS — Concept Representation System (CRS) v0.1</strong>
-    <div class="subtitle">
-      Language Adapter • Phase 1 (CRS) • Phase 2 (Reasoning) • Phase 3 (Supervisor) • Phases 4–5 (Evolution)
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-icon">◈</div>
+      <div>
+        <div class="brand-title">Knowledge Graph Explorer</div>
+        <div class="brand-sub">ECOS-CRS · CONTEXT &amp; EPISTEMIC GRAPH</div>
+      </div>
     </div>
+
+    <div class="topbar-actions">
+      <button class="btn btn-ghost" onclick="runAction('/api/reason', 'Reasoner')">Reason</button>
+      <button class="btn btn-ghost" onclick="runAction('/api/supervise', 'Supervisor')">Supervise</button>
+      <button class="btn btn-ghost" onclick="runAction('/api/evolve', 'Evolution')">Evolve</button>
+      <div class="graph-counter" id="graph-counter">0 nodes · 0 edges</div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <aside class="left-rail">
+      <div class="rail-section">
+        <div class="rail-title">Search</div>
+        <input type="text" id="search-input" class="input" placeholder="Search nodes, relations, labels..." oninput="applyFilters()" />
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-title">Node Types</div>
+        <div class="chip-grid" id="type-filters">
+          <button class="chip active" data-type="concept" onclick="toggleType('concept', this)">
+            <span class="dot dot-concept"></span>Concept
+          </button>
+          <button class="chip active" data-type="entity" onclick="toggleType('entity', this)">
+            <span class="dot dot-entity"></span>Entity
+          </button>
+          <button class="chip active" data-type="event" onclick="toggleType('event', this)">
+            <span class="dot dot-event"></span>Event
+          </button>
+          <button class="chip active" data-type="claim" onclick="toggleType('claim', this)">
+            <span class="dot dot-claim"></span>Claim
+          </button>
+        </div>
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-title">Layout</div>
+        <div class="layout-grid">
+          <button class="layout-btn active" data-layout="force" onclick="setLayout('force', this)">Force</button>
+          <button class="layout-btn" data-layout="circle" onclick="setLayout('circle', this)">Circle</button>
+          <button class="layout-btn" data-layout="grid" onclick="setLayout('grid', this)">Grid</button>
+        </div>
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-title">Ask Graph</div>
+        <div class="row-gap">
+          <input type="text" id="ask-input" class="input" placeholder="Ask about CRS state..." onkeydown="if(event.key==='Enter') askGraph()" />
+          <button class="btn btn-accent" onclick="askGraph()">Ask</button>
+        </div>
+        <div id="ask-box" class="mini-out hidden"></div>
+      </div>
+
+      <div class="rail-section">
+        <div class="rail-title">Ingest Statement</div>
+        <textarea id="ingest-input" class="textarea" rows="2" placeholder="Add statement to CRS..."></textarea>
+        <div class="row-gap mt-6">
+          <select id="ingest-mode" class="select">
+            <option value="rule">Rule</option>
+            <option value="llm">LLM</option>
+          </select>
+          <button class="btn btn-accent" onclick="ingestText()">Ingest</button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="canvas-wrap">
+      <svg id="graph-svg" viewBox="0 0 1200 760" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#6b7280" />
+          </marker>
+          <marker id="arrow-conflict" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#ef4444" />
+          </marker>
+        </defs>
+        <g id="edges-layer"></g>
+        <g id="edge-labels-layer"></g>
+        <g id="nodes-layer"></g>
+      </svg>
+
+      <div class="canvas-controls">
+        <button class="icon-btn" title="Zoom In" onclick="zoomBy(1.15)">+</button>
+        <button class="icon-btn" title="Zoom Out" onclick="zoomBy(0.87)">−</button>
+        <button class="icon-btn" title="Reset View" onclick="resetZoom()">⟲</button>
+      </div>
+
+      <div id="status-toast" class="toast hidden"></div>
+    </main>
+
+    <aside class="right-rail">
+      <div class="rail-section details-panel">
+        <div class="rail-title-row">
+          <span class="rail-title">Details</span>
+          <button class="btn-link" onclick="clearSelection()">Clear</button>
+        </div>
+        <div id="details-content" class="details-empty">
+          Click any node or edge to inspect properties, connections, and epistemic state.
+        </div>
+      </div>
+
+      <div class="rail-section legend-panel">
+        <div class="rail-title">Legend</div>
+        <div class="legend-list">
+          <div class="legend-item"><span class="shape diamond"></span> Concept</div>
+          <div class="legend-item"><span class="shape circle"></span> Entity</div>
+          <div class="legend-item"><span class="shape star"></span> Event</div>
+          <div class="legend-item"><span class="shape square"></span> Claim / Inference</div>
+          <div class="legend-item"><span class="line-sample membership"></span> Entity to Concept (instance_of)</div>
+          <div class="legend-item"><span class="line-sample solid"></span> Relation / Lineage</div>
+          <div class="legend-item"><span class="line-sample dashed"></span> Contradiction / Link</div>
+        </div>
+      </div>
+
+      <section class="rail-section chat-panel" aria-label="Chat with Qwen">
+        <div class="rail-title-row">
+          <span class="rail-title">Chat with Qwen</span>
+          <span class="chat-model">QWEN 3.8</span>
+        </div>
+        <div id="chat-messages" class="chat-messages" aria-live="polite">
+          <div class="chat-message assistant">
+            <div class="chat-role">Qwen</div>
+            <div class="chat-copy">Hi. What would you like to explore?</div>
+          </div>
+        </div>
+        <form id="chat-form" class="chat-composer" onsubmit="sendChat(event)">
+          <textarea id="chat-input" class="textarea" rows="2" maxlength="4000" placeholder="Write a message..." required></textarea>
+          <button id="chat-send" class="btn btn-accent" type="submit">Send</button>
+        </form>
+        <div id="chat-status" class="chat-status" role="status"></div>
+      </section>
+    </aside>
   </div>
-  <span class="tag ok">Prototype Online</span>
-</header>
 
-<main>
-  <div id="stats" class="stats"></div>
-
-  <div class="card">
-    <h2>0. Language Adapter: Sentence Ingestion &amp; Q&amp;A (Sections 48 &amp; 74)</h2>
-    <p class="hint">
-      Separate front-end adapter parses natural text into structured CRS claims via <code>LANGUAGE_ADAPTER</code>
-      (uses offline rule mode by default; can switch to <code>ollama</code> or <code>gemini</code>).
-    </p>
-    <div class="row">
-      <input id="nlpSentence" value="Witness A says Aarav is in Ahmedabad" style="min-width: 320px;" />
-      <select id="nlpMode">
-        <option value="rule">Mode: Offline Rule Parser (Zero Setup)</option>
-        <option value="ollama">Mode: Local Ollama (with rule fallback)</option>
-        <option value="gemini">Mode: Gemini API (with rule fallback)</option>
-      </select>
-      <button class="primary" onclick="ingestSentence()">Parse &amp; Write to CRS</button>
-    </div>
-    <div id="ingestMsg"></div>
-
-    <h3>Ask a Question Against CRS</h3>
-    <div class="row">
-      <input id="nlpAsk" value="કાર" placeholder="Ask about an entity or concept (EN / HI / GU)..." style="min-width: 320px;" />
-      <button onclick="askQuestion()">Query CRS</button>
-    </div>
-    <div id="askMsg"></div>
-  </div>
-
-  <div class="card">
-    <h2>1. Multilingual Concept Lookup (Section 4.1 &amp; 84)</h2>
-    <div class="row">
-      <input id="qConcept" placeholder="Search: car, પાણી, java, planet, AI..." style="min-width: 250px;" />
-      <button class="primary" onclick="loadConcepts()">Search</button>
-      <button onclick="quickConcept('કાર')">Gujarati: કાર</button>
-      <button onclick="quickConcept('પાણી')">Gujarati: પાણી</button>
-      <button onclick="quickConcept('java')">Polysemy: java</button>
-      <button onclick="quickConcept('planet')">Evolution: planet</button>
-      <button onclick="quickConcept('')">Show All</button>
-    </div>
-    <div id="conceptBox"></div>
-  </div>
-
-  <div class="card">
-    <h2>2. Time-Travel Query (Section 28)</h2>
-    <div class="row">
-      <select id="tSubj"></select>
-      <input id="tDate" type="date" value="2026-03-15" />
-      <button class="primary" onclick="loadTemporal()">Query Valid State</button>
-      <button onclick="quickTemporal('ent_car_001', '2026-03-15')">Car: Mar 2026</button>
-      <button onclick="quickTemporal('ent_car_001', '2026-08-15')">Car: Aug 2026</button>
-      <button onclick="quickTemporal('ent_pluto', '1995-01-01')">Pluto: 1995</button>
-      <button onclick="quickTemporal('ent_pluto', '2026-08-15')">Pluto: 2026</button>
-    </div>
-    <div id="tempBox"></div>
-  </div>
-
-  <div class="card">
-    <h2>3. Phase 2: Reasoning Engine (Section 69)</h2>
-    <p class="hint">
-      Runs outside CRS as <code>REASONING_ENGINE</code>: inherits defaults/exceptions,
-      derives rule-based claims with provenance, and scans for overlapping contradictions.
-    </p>
-    <div class="row">
-      <button class="reason-btn" onclick="runReasoning()">Run Reasoning Engine</button>
-    </div>
-    <div id="reasonMsg"></div>
-    <div id="inferredBox"></div>
-  </div>
-
-  <div class="card">
-    <h2>4. Phase 3: Cognitive Supervisor (Section 70)</h2>
-    <p class="hint">
-      Evaluates source reliability, triages contradictions without deleting claims,
-      flags critical <code>UNKNOWN</code> safety gaps, and spots fragile inferences.
-    </p>
-    <div class="row">
-      <button class="primary" onclick="runSupervisor()">Run Cognitive Supervisor</button>
-    </div>
-    <div id="supervisorMsg"></div>
-    <div id="supervisorBox"></div>
-  </div>
-
-  <div class="card">
-    <h2>5. Phases 4 &amp; 5: Learning &amp; Non-Destructive Concept Evolution (Sections 71–72)</h2>
-    <p class="hint">
-      Learns multi-claim entity profiles and performs non-destructive <code>REFINE</code> /
-      <code>SPLIT</code> concept evolution with full lineage edges.
-    </p>
-    <div class="row">
-      <button class="reason-btn" onclick="runEvolution()">Run Learning &amp; Evolution</button>
-    </div>
-    <div id="evolutionMsg"></div>
-    <div id="evolutionBox"></div>
-  </div>
-
-  <div class="card">
-    <h2>6. Contradictions, Unknown State, Provenance &amp; Evolution Lineage</h2>
-    <div id="overviewBox"></div>
-  </div>
-
-  <div class="card">
-    <h2>7. Add New Concept or Entity Live</h2>
-    <h3>Add Language-Independent Concept</h3>
-    <div class="row">
-      <input id="cId" placeholder="ID (e.g. concept_book)" />
-      <input id="cCanon" placeholder="Canonical (e.g. BOOK)" />
-      <input id="cEn" placeholder="English labels (comma-sep)" />
-      <input id="cHi" placeholder="Hindi (optional)" />
-      <input id="cGu" placeholder="Gujarati (optional)" />
-      <button class="primary" onclick="addConcept()">Add Concept</button>
-    </div>
-    <h3>Add Entity Instance</h3>
-    <div class="row">
-      <input id="eId" placeholder="Entity ID (e.g. ent_penguin)" />
-      <select id="eConcept"></select>
-      <input id="eLabel" placeholder="Display Name (e.g. Penguin)" />
-      <button class="primary" onclick="addEntity()">Add Entity</button>
-    </div>
-    <div id="createMsg"></div>
-  </div>
-
-  <div class="card">
-    <h2>8. Live Claim Write &amp; Invariant / Auth Guard (Sections 60 &amp; 87)</h2>
-    <div class="row">
-      <select id="wActor">
-        <option value="LANGUAGE_ADAPTER">Actor: LANGUAGE_ADAPTER (Allowed)</option>
-        <option value="COGNITIVE_SUPERVISOR">Actor: COGNITIVE_SUPERVISOR (Allowed)</option>
-        <option value="AEE">Actor: AEE (BLOCKED by Invariant 13)</option>
-      </select>
-      <select id="wSubj"></select>
-      <input id="wRel" value="location" />
-      <input id="wVal" value="Ahmedabad" />
-      <select id="wState">
-        <option>REPORTED</option>
-        <option>OBSERVED</option>
-        <option>HYPOTHESIZED</option>
-        <option>UNKNOWN</option>
-      </select>
-      <select id="wPol">
-        <option>POSITIVE</option>
-        <option>NEGATIVE</option>
-        <option>UNKNOWN</option>
-      </select>
-      <button class="primary" onclick="submitClaim()">Write Claim</button>
-    </div>
-    <div id="writeMsg"></div>
-  </div>
-</main>
-
-<script src="/static/app.js"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>

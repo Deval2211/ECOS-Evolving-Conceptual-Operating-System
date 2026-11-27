@@ -10,6 +10,7 @@ from engine import CRSEngine
 from models import (
     ActorRole,
     Claim,
+    Concept,
     Entity,
     EpistemicState,
     Polarity,
@@ -260,4 +261,213 @@ class LanguageAdapter:
             "matched_entity": matched_entity.id if matched_entity else None,
             "claims_found": len(claims_for_entity),
             "answer": answer,
+        }
+
+    def _find_chat_concept(self, name: str) -> Optional[Concept]:
+        normalized = name.strip().casefold()
+        for concept in self.crs.concepts.values():
+            labels = (label for values in concept.labels.values() for label in values)
+            if concept.canonical.casefold() == normalized or any(
+                label.casefold() == normalized for label in labels
+            ):
+                return concept
+        return None
+
+    def _get_or_create_chat_concept(
+        self, canonical: str, raw_labels: Any = None
+    ) -> Tuple[Concept, bool]:
+        existing = self._find_chat_concept(canonical)
+        if existing:
+            return existing, False
+
+        if isinstance(raw_labels, str):
+            raw_labels = [raw_labels]
+        elif not isinstance(raw_labels, (list, tuple)):
+            raw_labels = []
+        labels = tuple(
+            dict.fromkeys(
+                [canonical]
+                + [
+                    label.strip()
+                    for label in raw_labels or []
+                    if isinstance(label, str) and label.strip()
+                ]
+            )
+        )
+        slug = re.sub(r"[^a-z0-9]+", "_", canonical.casefold()).strip("_")[:48]
+        concept = Concept(
+            id=f"concept_chat_{slug or 'new'}_{uuid.uuid4().hex[:6]}",
+            canonical=canonical,
+            labels={"en": labels},
+        )
+        self.crs.add_concept(concept, actor=ActorRole.LANGUAGE_ADAPTER)
+        return concept, True
+
+    def chat(
+        self,
+        message: str,
+        history: Optional[List[Dict[str, str]]] = None,
+    ) -> Dict[str, Any]:
+        """Chat with Qwen and add explicitly mentioned concepts and entities to the CRS."""
+        message = message.strip()
+        if not message:
+            raise ValueError("Message cannot be empty.")
+        if len(message) > 4000:
+            raise ValueError("Message is too long (maximum 4000 characters).")
+
+        api_key = os.environ.get("GROQ_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError(
+                "Groq is not configured. Set GROQ_API_KEY before starting the server."
+            )
+
+        known_concepts = ", ".join(
+            concept.canonical for concept in list(self.crs.concepts.values())[:100]
+        )
+        system_prompt = (
+            "You are a conversational assistant connected to a symbolic knowledge graph. "
+            "Answer the user's latest message naturally. Extract only concepts and named "
+            "entities explicitly stated in that latest user message; use prior turns only "
+            "to resolve references, and never invent facts. A concept is a reusable type "
+            "or category. Each entity must name its concept, and concepts should be "
+            "included when they are not already known. Existing concepts: "
+            f"{known_concepts}. Return only a JSON object with this shape: "
+            '{"reply":"...","concepts":[{"canonical":"...","labels":["..."]}],'
+            '"entities":[{"name":"...","concept":"..."}]}. Use empty arrays '
+            "when nothing new is explicit."
+        )
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": system_prompt}
+        ]
+        for item in (history or [])[-12:]:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            content = item.get("content")
+            if role in ("user", "assistant") and isinstance(content, str):
+                messages.append({"role": role, "content": content[:2000]})
+        messages.append({"role": "user", "content": message})
+
+        request_body = {
+            "model": os.environ.get("GROQ_MODEL", "qwen/qwen3.8-27b"),
+            "messages": messages,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
+        }
+        request = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=json.dumps(request_body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                api_response = json.loads(response.read().decode("utf-8"))
+            content = api_response["choices"][0]["message"]["content"]
+            extracted = json.loads(content)
+        except urllib.error.HTTPError as exc:
+            try:
+                error_payload = json.loads(exc.read().decode("utf-8", "replace"))
+                error_detail = error_payload.get("error", error_payload)
+                if isinstance(error_detail, dict):
+                    error_detail = error_detail.get("message", "")
+                if not isinstance(error_detail, str):
+                    error_detail = ""
+            except (json.JSONDecodeError, AttributeError, OSError):
+                error_detail = ""
+            error_detail = error_detail.replace(api_key, "[redacted]").strip()[:500]
+            if exc.code == 401:
+                message = "Groq authentication failed"
+            else:
+                message = f"Groq API returned HTTP {exc.code}"
+            if error_detail:
+                message = f"{message}: {error_detail}"
+            elif exc.code == 401:
+                message = f"{message}. Check GROQ_API_KEY."
+            raise RuntimeError(message) from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise RuntimeError("Could not reach the Grok API.") from exc
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Grok returned an invalid structured response.") from exc
+
+        if not isinstance(extracted, dict):
+            raise RuntimeError("Grok returned an invalid structured response.")
+        reply = extracted.get("reply")
+        if not isinstance(reply, str) or not reply.strip():
+            raise RuntimeError("Grok did not return a chat reply.")
+
+        added_concepts: List[Dict[str, str]] = []
+        concept_records = extracted.get("concepts", [])
+        if isinstance(concept_records, list):
+            for record in concept_records[:20]:
+                if not isinstance(record, dict):
+                    continue
+                canonical = record.get("canonical")
+                if not isinstance(canonical, str) or not canonical.strip():
+                    continue
+                canonical = canonical.strip()[:120]
+                concept, created = self._get_or_create_chat_concept(
+                    canonical, record.get("labels")
+                )
+                if created:
+                    added_concepts.append(
+                        {"id": concept.id, "canonical": concept.canonical}
+                    )
+
+        added_entities: List[Dict[str, str]] = []
+        entity_records = extracted.get("entities", [])
+        if isinstance(entity_records, list):
+            for record in entity_records[:30]:
+                if not isinstance(record, dict):
+                    continue
+                name = record.get("name")
+                concept_name = record.get("concept")
+                if not isinstance(name, str) or not isinstance(concept_name, str):
+                    continue
+                name = name.strip()[:120]
+                concept_name = concept_name.strip()[:120]
+                if not name or not concept_name:
+                    continue
+
+                concept, created = self._get_or_create_chat_concept(concept_name)
+                if created:
+                    added_concepts.append(
+                        {"id": concept.id, "canonical": concept.canonical}
+                    )
+                normalized_name = name.casefold()
+                existing_entity = next(
+                    (
+                        entity
+                        for entity in self.crs.entities.values()
+                        if entity.id.casefold() == normalized_name
+                        or any(label.casefold() == normalized_name for label in entity.labels)
+                    ),
+                    None,
+                )
+                if existing_entity:
+                    continue
+
+                slug = re.sub(r"[^a-z0-9]+", "_", name.casefold()).strip("_")[:48]
+                entity = Entity(
+                    id=f"ent_chat_{slug or 'new'}_{uuid.uuid4().hex[:6]}",
+                    concept_id=concept.id,
+                    labels=(name,),
+                )
+                self.crs.add_entity(entity, actor=ActorRole.LANGUAGE_ADAPTER)
+                added_entities.append(
+                    {
+                        "id": entity.id,
+                        "name": name,
+                        "concept_id": concept.id,
+                    }
+                )
+
+        return {
+            "reply": reply.strip(),
+            "added": {"concepts": added_concepts, "entities": added_entities},
+            "model": request_body["model"],
         }

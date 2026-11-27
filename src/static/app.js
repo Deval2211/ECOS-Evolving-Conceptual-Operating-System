@@ -1,261 +1,595 @@
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({
-  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-}[c]));
+const state = {
+  nodes: [],
+  edges: [],
+  activeTypes: new Set(["concept", "entity", "event", "claim"]),
+  search: "",
+  layout: "force",
+  selectedId: null,
+  chatHistory: [],
+  draggingId: null,
+  zoom: 1,
+  pan: { x: 0, y: 0 },
+  panning: false,
+  panStart: { x: 0, y: 0 }
+};
 
-function fillSelect(id, options, extraLast = null) {
-  const el = document.getElementById(id);
-  const prev = el.value;
-  el.innerHTML = options.map(o => `<option value="${esc(o.v)}">${esc(o.t)}</option>`).join('') +
-    (extraLast ? `<option value="${esc(extraLast.v)}">${esc(extraLast.t)}</option>` : '');
-  if (prev && [...el.options].some(opt => opt.value === prev)) {
-    el.value = prev;
+const TYPE_COLORS = {
+  concept: "#a855f7",
+  entity: "#06b6d4",
+  event: "#eab308",
+  claim: "#ec4899"
+};
+
+function toast(msg) {
+  const el = document.getElementById("status-toast");
+  el.textContent = msg;
+  el.classList.remove("hidden");
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.add("hidden"), 2600);
+}
+
+async function loadGraphData() {
+  const res = await fetch("/api/overview");
+  const data = await res.json();
+
+  const nodes = [];
+  const edges = [];
+  const nodeIds = new Set();
+
+  function addNode(n) {
+    if (nodeIds.has(n.id)) return;
+    nodeIds.add(n.id);
+    nodes.push({
+      x: 220 + Math.random() * 760,
+      y: 120 + Math.random() * 500,
+      ...n
+    });
+  }
+
+  for (const c of data.concepts || []) {
+    addNode({
+      id: c.id,
+      label: c.canonical || c.id,
+      type: "concept",
+      meta: c
+    });
+  }
+
+  for (const e of data.entities || []) {
+    const lbl = (e.labels && e.labels[0]) || e.id;
+    addNode({
+      id: e.id,
+      label: lbl,
+      type: "entity",
+      meta: e
+    });
+    if (e.concept_id && nodeIds.has(e.concept_id)) {
+      edges.push({
+        id: `edge_${e.id}_${e.concept_id}`,
+        from: e.id,
+        to: e.concept_id,
+        label: "instance_of",
+        kind: "membership"
+      });
+    }
+  }
+
+  for (const ev of data.events || []) {
+    addNode({
+      id: ev.id,
+      label: ev.event_type || ev.id,
+      type: "event",
+      meta: ev
+    });
+    for (const [role, participantId] of Object.entries(ev.participants || {})) {
+      if (nodeIds.has(participantId)) {
+        edges.push({
+          id: `edge_${ev.id}_${role}_${participantId}`,
+          from: ev.id,
+          to: participantId,
+          label: role,
+          kind: "relation"
+        });
+      }
+    }
+  }
+
+  for (const row of data.inferred || []) {
+    const cl = row.claim;
+    addNode({
+      id: cl.id,
+      label: `${cl.relation}: ${cl.object_value}`,
+      type: "claim",
+      meta: { ...cl, provenance_trace: row.provenance_trace }
+    });
+    if (nodeIds.has(cl.subject_id)) {
+      edges.push({
+        id: `edge_${cl.subject_id}_${cl.id}`,
+        from: cl.subject_id,
+        to: cl.id,
+        label: cl.epistemic_state,
+        kind: "relation"
+      });
+    }
+  }
+
+  for (const cl of data.learned || []) {
+    addNode({
+      id: cl.id,
+      label: `${cl.relation}=${cl.object_value}`,
+      type: "claim",
+      meta: cl
+    });
+    if (nodeIds.has(cl.subject_id)) {
+      edges.push({
+        id: `edge_${cl.subject_id}_${cl.id}`,
+        from: cl.subject_id,
+        to: cl.id,
+        label: "learned",
+        kind: "relation"
+      });
+    }
+  }
+
+  for (const u of data.unknown || []) {
+    addNode({
+      id: u.id,
+      label: `${u.relation}?`,
+      type: "claim",
+      meta: u
+    });
+    if (nodeIds.has(u.subject_id)) {
+      edges.push({
+        id: `edge_${u.subject_id}_${u.id}`,
+        from: u.subject_id,
+        to: u.id,
+        label: "UNKNOWN",
+        kind: "conflict"
+      });
+    }
+  }
+
+  for (const pair of data.contradictions || []) {
+    const a = pair.claim_a;
+    const b = pair.claim_b;
+    for (const cl of [a, b]) {
+      addNode({
+        id: cl.id,
+        label: `${cl.relation}: ${cl.object_value}`,
+        type: "claim",
+        meta: cl
+      });
+      if (nodeIds.has(cl.subject_id)) {
+        edges.push({
+          id: `edge_${cl.subject_id}_${cl.id}`,
+          from: cl.subject_id,
+          to: cl.id,
+          label: cl.relation,
+          kind: "relation"
+        });
+      }
+    }
+    edges.push({
+      id: pair.link.id,
+      from: a.id,
+      to: b.id,
+      label: "contradicts",
+      kind: "conflict",
+      meta: pair.link
+    });
+  }
+
+  for (const edge of data.lineage || []) {
+    if (nodeIds.has(edge.from_concept_id) && nodeIds.has(edge.to_concept_id)) {
+      edges.push({
+        id: `lin_${edge.from_concept_id}_${edge.to_concept_id}`,
+        from: edge.from_concept_id,
+        to: edge.to_concept_id,
+        label: edge.operation,
+        kind: "lineage",
+        meta: edge
+      });
+    }
+  }
+
+  state.nodes = nodes;
+  state.edges = edges;
+  computeLayout(state.layout);
+  renderGraph();
+}
+
+function getFilteredGraph() {
+  const q = state.search.trim().toLowerCase();
+  const visibleNodes = state.nodes.filter(n => {
+    if (!state.activeTypes.has(n.type)) return false;
+    if (!q) return true;
+    return (
+      n.label.toLowerCase().includes(q) ||
+      n.id.toLowerCase().includes(q) ||
+      JSON.stringify(n.meta).toLowerCase().includes(q)
+    );
+  });
+  const ids = new Set(visibleNodes.map(n => n.id));
+  const visibleEdges = state.edges.filter(e => ids.has(e.from) && ids.has(e.to));
+  return { visibleNodes, visibleEdges };
+}
+
+function computeLayout(mode) {
+  const { visibleNodes, visibleEdges } = getFilteredGraph();
+  const W = 1200, H = 760;
+
+  if (mode === "circle") {
+    const cx = W / 2, cy = H / 2, r = Math.min(W, H) * 0.36;
+    visibleNodes.forEach((n, i) => {
+      const angle = (2 * Math.PI * i) / Math.max(visibleNodes.length, 1);
+      n.x = cx + r * Math.cos(angle);
+      n.y = cy + r * Math.sin(angle);
+    });
+    return;
+  }
+
+  if (mode === "grid") {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(visibleNodes.length * 1.4)));
+    const padX = 140, padY = 110;
+    visibleNodes.forEach((n, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      n.x = padX + col * ((W - padX * 2) / Math.max(cols - 1, 1));
+      n.y = padY + row * 125;
+    });
+    return;
+  }
+
+  const byId = Object.fromEntries(visibleNodes.map(n => [n.id, n]));
+  for (let iter = 0; iter < 140; iter++) {
+    for (let i = 0; i < visibleNodes.length; i++) {
+      for (let j = i + 1; j < visibleNodes.length; j++) {
+        const a = visibleNodes[i], b = visibleNodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        const dist2 = dx * dx + dy * dy + 1;
+        const force = 6200 / dist2;
+        const dist = Math.sqrt(dist2);
+        dx = (dx / dist) * force;
+        dy = (dy / dist) * force;
+        a.x -= dx; a.y -= dy;
+        b.x += dx; b.y += dy;
+      }
+    }
+    for (const e of visibleEdges) {
+      const a = byId[e.from], b = byId[e.to];
+      if (!a || !b) continue;
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const pull = (dist - 125) * 0.035;
+      const fx = (dx / dist) * pull;
+      const fy = (dy / dist) * pull;
+      a.x += fx; a.y += fy;
+      b.x -= fx; b.y -= fy;
+    }
+    for (const n of visibleNodes) {
+      n.x += (W / 2 - n.x) * 0.012;
+      n.y += (H / 2 - n.y) * 0.012;
+      n.x = Math.max(80, Math.min(W - 80, n.x));
+      n.y = Math.max(60, Math.min(H - 60, n.y));
+    }
   }
 }
 
-async function ingestSentence() {
-  const body = {
-    sentence: document.getElementById('nlpSentence').value,
-    mode: document.getElementById('nlpMode').value,
-  };
-  const res = await fetch('/api/ingest', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  });
-  const d = await res.json();
-  document.getElementById('ingestMsg').innerHTML = res.ok
-    ? `<div class="msg ok"><b>ADAPTER [${esc(d.parser_used)}] STORED CLAIM:</b> <code>${esc(d.claim.id)}</code> ` +
-      `(${esc(d.claim.subject_id)}.${esc(d.claim.relation)} = <b>${esc(d.claim.object_value)}</b>, ` +
-      `state=${esc(d.claim.epistemic_state)})</div>`
-    : `<div class="msg err"><b>ADAPTER ERROR:</b> ${esc(d.error)}</div>`;
-  await loadOverview();
+function renderGraph() {
+  const { visibleNodes, visibleEdges } = getFilteredGraph();
+  document.getElementById("graph-counter").textContent =
+    `${visibleNodes.length} nodes · ${visibleEdges.length} edges`;
+
+  const byId = Object.fromEntries(visibleNodes.map(n => [n.id, n]));
+  const edgesLayer = document.getElementById("edges-layer");
+  const labelsLayer = document.getElementById("edge-labels-layer");
+  const nodesLayer = document.getElementById("nodes-layer");
+
+  edgesLayer.innerHTML = "";
+  labelsLayer.innerHTML = "";
+  nodesLayer.innerHTML = "";
+
+  const transform = `translate(${state.pan.x}, ${state.pan.y}) scale(${state.zoom})`;
+  edgesLayer.setAttribute("transform", transform);
+  labelsLayer.setAttribute("transform", transform);
+  nodesLayer.setAttribute("transform", transform);
+
+  for (const e of visibleEdges) {
+    const a = byId[e.from], b = byId[e.to];
+    if (!a || !b) continue;
+
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const distance = Math.hypot(dx, dy) || 1;
+    const sourcePadding = a.type === "concept" ? 12 : 11;
+    const targetPadding = b.type === "concept" ? 12 : 11;
+
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", a.x + dx / distance * sourcePadding);
+    line.setAttribute("y1", a.y + dy / distance * sourcePadding);
+    line.setAttribute("x2", b.x - dx / distance * targetPadding);
+    line.setAttribute("y2", b.y - dy / distance * targetPadding);
+    line.setAttribute(
+      "class",
+      `edge-line ${e.kind === "membership" ? "membership" : ""} ${e.kind === "conflict" ? "conflict" : ""} ${e.kind === "lineage" ? "lineage" : ""}`
+    );
+    line.setAttribute(
+      "marker-end",
+      e.kind === "conflict" ? "url(#arrow-conflict)" : "url(#arrow)"
+    );
+    const edgeTitle = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    edgeTitle.textContent = `${a.label} ${e.label} ${b.label}`;
+    line.appendChild(edgeTitle);
+    line.onclick = () => selectEdge(e);
+    edgesLayer.appendChild(line);
+
+    const txt = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    txt.setAttribute("x", (a.x + b.x) / 2);
+    txt.setAttribute("y", (a.y + b.y) / 2 - 4);
+    txt.setAttribute("text-anchor", "middle");
+    txt.setAttribute("class", `edge-label ${e.kind === "membership" ? "membership-label" : ""}`);
+    txt.textContent = e.label;
+    labelsLayer.appendChild(txt);
+  }
+
+  for (const n of visibleNodes) {
+    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    g.setAttribute("class", `node-group ${state.selectedId === n.id ? "selected" : ""}`);
+    g.setAttribute("transform", `translate(${n.x}, ${n.y})`);
+
+    const color = TYPE_COLORS[n.type] || "#22c55e";
+    let shapeEl;
+
+    if (n.type === "concept") {
+      shapeEl = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+      shapeEl.setAttribute("points", "0,-10 10,0 0,10 -10,0");
+    } else if (n.type === "claim") {
+      shapeEl = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      shapeEl.setAttribute("x", "-8");
+      shapeEl.setAttribute("y", "-8");
+      shapeEl.setAttribute("width", "16");
+      shapeEl.setAttribute("height", "16");
+      shapeEl.setAttribute("rx", "2");
+    } else {
+      shapeEl = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      shapeEl.setAttribute("r", "8");
+    }
+
+    shapeEl.setAttribute("fill", color);
+    shapeEl.setAttribute("class", "node-shape");
+
+    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    label.setAttribute("y", "21");
+    label.textContent = n.label.length > 26 ? n.label.slice(0, 24) + "…" : n.label;
+
+    g.onmousedown = ev => {
+      ev.stopPropagation();
+      state.draggingId = n.id;
+      selectNode(n);
+    };
+
+    g.appendChild(shapeEl);
+    g.appendChild(label);
+    nodesLayer.appendChild(g);
+  }
 }
 
-async function askQuestion() {
-  const q = document.getElementById('nlpAsk').value;
-  const res = await fetch('/api/ask?q=' + encodeURIComponent(q));
-  const d = await res.json();
-  document.getElementById('askMsg').innerHTML = res.ok
-    ? `<div class="msg ok"><b>CRS ANSWER:</b> ${esc(d.answer)}</div>`
-    : `<div class="msg err"><b>ERROR:</b> ${esc(d.error)}</div>`;
-}
+function selectNode(n) {
+  state.selectedId = n.id;
+  renderGraph();
 
-async function loadOverview() {
-  const d = await (await fetch('/api/overview')).json();
+  const outgoing = state.edges.filter(e => e.from === n.id);
+  const incoming = state.edges.filter(e => e.to === n.id);
 
-  document.getElementById('stats').innerHTML = Object.entries(d.stats)
-    .map(([k, v]) => `<div class="stat"><b>${v}</b><span>${esc(k)}</span></div>`)
-    .join('');
-
-  const entOpts = d.entities.map(e => ({ v: e.id, t: `${e.labels[0] || e.id} (${e.id})` }));
-  fillSelect('tSubj', entOpts);
-  fillSelect('wSubj', entOpts, { v: 'ent_missing', t: 'ent_missing (Triggers Ref Error)' });
-  fillSelect('eConcept', d.concepts.map(c => ({ v: c.id, t: `${c.canonical} (${c.id})` })));
-
-  document.getElementById('inferredBox').innerHTML = d.inferred.length ? `<table>
-    <tr><th>Claim ID</th><th>Subject</th><th>Relation</th><th>Derived Value</th><th>Provenance Trace</th></tr>
-    ${d.inferred.map(item => `<tr>
-      <td><code>${esc(item.claim.id)}</code></td>
-      <td>${esc(item.claim.subject_id)}</td>
-      <td>${esc(item.claim.relation)}</td>
-      <td><span class="tag purple">${esc(item.claim.object_value)}</span></td>
-      <td><small>${esc(item.provenance_trace)}</small></td>
-    </tr>`).join('')}
-  </table>` : '<p class="hint">No inferred claims yet. Click "Run Reasoning Engine" above.</p>';
-
-  const learnedList = (d.learned || []).map(c =>
-    `<li><span class="tag ok">INTERPRETED</span> <code>${esc(c.id)}</code>: ` +
-    `<b>${esc(c.subject_id)}</b> has <b>${esc(c.object_value)}</b> claim(s)</li>`
-  ).join('');
-
-  document.getElementById('evolutionBox').innerHTML = learnedList
-    ? `<p><b>Learned Multi-Claim Profiles:</b><ul>${learnedList}</ul></p>`
-    : '<p class="hint">No learned profiles yet. Click "Run Learning &amp; Evolution" above.</p>';
-
-  const contra = d.contradictions.map(x =>
-    `<li><span class="tag err">CONTESTED</span> ` +
-    `<code>${esc(x.claim_a.id)}</code> (${esc(x.claim_a.subject_id)}.${esc(x.claim_a.relation)}=<b>${esc(x.claim_a.object_value)}</b>) ` +
-    `<b>&harr; contradicts &harr;</b> ` +
-    `<code>${esc(x.claim_b.id)}</code> (<b>${esc(x.claim_b.object_value)}</b>) ` +
-    `<small>— ${esc(x.link.note)}</small></li>`
-  ).join('');
-
-  const unk = d.unknown.map(c =>
-    `<li><span class="tag warn">${esc(c.epistemic_state)}</span> ` +
-    `<code>${esc(c.id)}</code>: ${esc(c.subject_id)}.${esc(c.relation)} ` +
-    `(polarity=<b>${esc(c.polarity)}</b> — Unknown != False)</li>`
-  ).join('');
-
-  const prov = d.provenance
-    .map(n => `<span class="tag">${esc(n.kind.toUpperCase())}: ${esc(n.id)}</span>`)
-    .join(' &larr; ');
-
-  const lin = d.lineage.map(e =>
-    `<li><code>${esc(e.from_concept_id)}</code> ` +
-    `<b>--${esc(e.operation)}--&gt;</b> ` +
-    `<code>${esc(e.to_concept_id)}</code> (${esc(e.reason)})</li>`
-  ).join('');
-
-  document.getElementById('overviewBox').innerHTML = `
-    <p><b>Preserved Contradictions:</b><ul>${contra}</ul></p>
-    <p><b>Explicit Unknowns:</b><ul>${unk}</ul></p>
-    <p><b>Provenance Trace (Dog_001 warm-blooded):</b><br/>${prov}</p>
-    <p><b>Concept Evolution Lineage:</b><ul>${lin}</ul></p>
+  document.getElementById("details-content").innerHTML = `
+    <div class="detail-heading">${n.label}</div>
+    <div class="detail-sub">${n.type.toUpperCase()} · ${n.id}</div>
+    <div class="prop-block">
+      <div class="prop-key">Outgoing (${outgoing.length})</div>
+      <div class="prop-val">${outgoing.map(e => `→ ${e.label} → ${e.to}`).join("<br/>") || "None"}</div>
+    </div>
+    <div class="prop-block">
+      <div class="prop-key">Incoming (${incoming.length})</div>
+      <div class="prop-val">${incoming.map(e => `← ${e.label} ← ${e.from}`).join("<br/>") || "None"}</div>
+    </div>
+    <div class="prop-block">
+      <div class="prop-key">Metadata</div>
+      <div class="prop-val"><pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:10px">${JSON.stringify(n.meta, null, 2)}</pre></div>
+    </div>
   `;
 }
 
-async function runReasoning() {
-  const res = await fetch('/api/reason', { method: 'POST' });
-  const r = await res.json();
-  document.getElementById('reasonMsg').innerHTML =
-    `<div class="msg ok"><b>REASONING PASS COMPLETE:</b> Added <b>${r.inferences_added}</b> new inferred claim(s) ` +
-    `and detected <b>${r.contradictions_detected}</b> new contradiction(s).</div>`;
-  await loadOverview();
-  loadTemporal();
-}
-
-async function runSupervisor() {
-  const res = await fetch('/api/supervise', { method: 'POST' });
-  const r = await res.json();
-  document.getElementById('supervisorMsg').innerHTML =
-    `<div class="msg ok"><b>SUPERVISOR REVIEW COMPLETE:</b> Reviewed <b>${r.contradictions_reviewed}</b> contradiction(s), ` +
-    `<b>${r.unknown_alerts}</b> unknown state(s), and <b>${r.fragile_inferences}</b> fragile inference(s).</div>`;
-
-  const triages = (r.contradiction_reports || []).map(t =>
-    `<li><span class="tag warn">${esc(t.verdict)}</span> <b>${esc(t.subject)}.${esc(t.relation)}</b>: ` +
-    `${esc(t.claim_a.value)} (${esc(t.claim_a.source)}, score=${esc(t.claim_a.score)}) vs ` +
-    `${esc(t.claim_b.value)} (${esc(t.claim_b.source)}, score=${esc(t.claim_b.score)}) &rarr; <em>${esc(t.recommended_action)}</em></li>`
-  ).join('');
-
-  const uAlerts = (r.unknown_reports || []).map(u =>
-    `<li><span class="tag ${u.priority === 'HIGH_SAFETY' ? 'err' : 'warn'}">${esc(u.priority)}</span> ` +
-    `<code>${esc(u.subject)}.${esc(u.relation)}</code> &rarr; ${esc(u.guidance)}</li>`
-  ).join('');
-
-  const fragile = (r.fragile_inference_reports || []).map(f =>
-    `<li><span class="tag err">FRAGILE</span> <code>${esc(f.subject)}.${esc(f.relation)}</code> = ` +
-    `<b>${esc(f.value)}</b> (weak sources: ${esc(f.weak_sources.join(', '))})</li>`
-  ).join('');
-
-  document.getElementById('supervisorBox').innerHTML = `
-    <p><b>Contradiction Triage:</b><ul>${triages || '<li>None</li>'}</ul></p>
-    <p><b>Critical UNKNOWN Alerts:</b><ul>${uAlerts || '<li>None</li>'}</ul></p>
-    <p><b>Fragile Inferences:</b><ul>${fragile || '<li>None</li>'}</ul></p>
+function selectEdge(e) {
+  document.getElementById("details-content").innerHTML = `
+    <div class="detail-heading">${e.label}</div>
+    <div class="detail-sub">${e.from} → ${e.to}</div>
+    <div class="prop-block">
+      <div class="prop-key">Edge Type</div>
+      <div class="prop-val">${e.kind}</div>
+    </div>
+    ${e.meta ? `<div class="prop-block"><div class="prop-key">Details</div><div class="prop-val">${JSON.stringify(e.meta)}</div></div>` : ""}
   `;
-  await loadOverview();
 }
 
-async function runEvolution() {
-  const res = await fetch('/api/evolve', { method: 'POST' });
-  const r = await res.json();
-  document.getElementById('evolutionMsg').innerHTML =
-    `<div class="msg ok"><b>EVOLUTION PASS COMPLETE:</b> Learned <b>${r.learned_claims_added}</b> profile(s), ` +
-    `refined <b>${r.concepts_refined}</b> concept(s), and split <b>${r.concepts_split}</b> ambiguous label(s).</div>`;
-  await loadOverview();
-  loadConcepts();
+function clearSelection() {
+  state.selectedId = null;
+  renderGraph();
+  document.getElementById("details-content").innerHTML =
+    `<div class="details-empty">Click any node or edge to inspect properties, connections, and epistemic state.</div>`;
 }
 
-async function loadConcepts() {
-  const q = document.getElementById('qConcept').value;
-  const rows = await (await fetch('/api/concepts?q=' + encodeURIComponent(q))).json();
-  document.getElementById('conceptBox').innerHTML = `<table>
-    <tr><th>ID</th><th>Canonical</th><th>Ver</th><th>Multilingual Labels</th><th>Defaults / Exceptions</th></tr>
-    ${rows.map(c => `<tr>
-      <td><code>${esc(c.id)}</code></td>
-      <td><b>${esc(c.canonical)}</b></td>
-      <td>v${c.version}</td>
-      <td>${Object.entries(c.labels).map(([l, v]) =>
-        `<span class="tag">${esc(l)}: ${esc(v.join(', '))}</span>`
-      ).join('')}</td>
-      <td>${esc(c.defaults.join(', '))}${c.exceptions.length
-        ? '<br/><span class="warn">Exceptions: ' + esc(c.exceptions.join(', ')) + '</span>'
-        : ''}</td>
-    </tr>`).join('')}
-  </table>`;
+function toggleType(type, btn) {
+  if (state.activeTypes.has(type)) {
+    state.activeTypes.delete(type);
+    btn.classList.remove("active");
+  } else {
+    state.activeTypes.add(type);
+    btn.classList.add("active");
+  }
+  computeLayout(state.layout);
+  renderGraph();
 }
 
-function quickConcept(v) {
-  document.getElementById('qConcept').value = v;
-  loadConcepts();
+function applyFilters() {
+  state.search = document.getElementById("search-input").value;
+  computeLayout(state.layout);
+  renderGraph();
 }
 
-async function loadTemporal() {
-  const s = document.getElementById('tSubj').value || 'ent_car_001';
-  const dt = document.getElementById('tDate').value;
-  const url = `/api/temporal?subject=${encodeURIComponent(s)}&date=${encodeURIComponent(dt)}`;
-  const rows = await (await fetch(url)).json();
-  document.getElementById('tempBox').innerHTML = rows.length ? `<table>
-    <tr><th>Claim ID</th><th>Relation</th><th>Value</th><th>State</th><th>Valid Window</th></tr>
-    ${rows.map(c => `<tr>
-      <td><code>${esc(c.id)}</code></td>
-      <td>${esc(c.relation)}</td>
-      <td><b>${esc(c.object_value)}</b></td>
-      <td><span class="tag">${esc(c.epistemic_state)}</span></td>
-      <td>${esc(c.temporal.valid_from || 'open')} &rarr; ${esc(c.temporal.valid_to || 'present')}</td>
-    </tr>`).join('')}
-  </table>` : '<p class="hint">No valid claims on this date.</p>';
+function setLayout(mode, btn) {
+  state.layout = mode;
+  document.querySelectorAll(".layout-btn").forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  computeLayout(mode);
+  renderGraph();
 }
 
-function quickTemporal(subj, dt) {
-  document.getElementById('tSubj').value = subj;
-  document.getElementById('tDate').value = dt;
-  loadTemporal();
+function zoomBy(factor) {
+  state.zoom = Math.max(0.4, Math.min(2.5, state.zoom * factor));
+  renderGraph();
 }
 
-async function addConcept() {
-  const body = {
-    id: document.getElementById('cId').value.trim(),
-    canonical: document.getElementById('cCanon').value.trim().toUpperCase(),
-    en: document.getElementById('cEn').value,
-    hi: document.getElementById('cHi').value,
-    gu: document.getElementById('cGu').value,
-  };
-  const res = await fetch('/api/concepts', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+function resetZoom() {
+  state.zoom = 1;
+  state.pan = { x: 0, y: 0 };
+  renderGraph();
+}
+
+async function askGraph() {
+  const q = document.getElementById("ask-input").value.trim();
+  if (!q) return;
+  const box = document.getElementById("ask-box");
+  box.classList.remove("hidden");
+  box.textContent = "Querying...";
+  const res = await fetch(`/api/ask?q=${encodeURIComponent(q)}`);
+  const data = await res.json();
+  box.textContent = data.answer || JSON.stringify(data, null, 2);
+}
+
+function appendChatMessage(role, text) {
+  const item = document.createElement("div");
+  item.className = `chat-message ${role}`;
+
+  if (role !== "system") {
+    const speaker = document.createElement("div");
+    speaker.className = "chat-role";
+    speaker.textContent = role === "user" ? "You" : "Qwen";
+    item.appendChild(speaker);
+  }
+
+  const content = document.createElement("div");
+  content.className = "chat-copy";
+  content.textContent = text;
+  item.appendChild(content);
+
+  const messages = document.getElementById("chat-messages");
+  messages.appendChild(item);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+async function sendChat(event) {
+  event.preventDefault();
+  const input = document.getElementById("chat-input");
+  const button = document.getElementById("chat-send");
+  const status = document.getElementById("chat-status");
+  const message = input.value.trim();
+  if (!message) return;
+
+  appendChatMessage("user", message);
+  input.value = "";
+  button.disabled = true;
+  status.textContent = "Waiting for Qwen...";
+
+  try {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, history: state.chatHistory })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Grok request failed.");
+
+    const reply = typeof data.reply === "string" ? data.reply : "I couldn't form a response.";
+    state.chatHistory.push(
+      { role: "user", content: message },
+      { role: "assistant", content: reply }
+    );
+    appendChatMessage("assistant", reply);
+
+    const added = data.added || {};
+    const concepts = Array.isArray(added.concepts) ? added.concepts : [];
+    const entities = Array.isArray(added.entities) ? added.entities : [];
+    const graphUpdates = [];
+    if (concepts.length) graphUpdates.push(`${concepts.length} concept${concepts.length === 1 ? "" : "s"}`);
+    if (entities.length) graphUpdates.push(`${entities.length} entit${entities.length === 1 ? "y" : "ies"}`);
+    if (graphUpdates.length) {
+      appendChatMessage("system", `Added ${graphUpdates.join(" and ")} to the graph.`);
+      await loadGraphData();
+    }
+    status.textContent = data.model ? `Connected · ${data.model}` : "Connected to Qwen";
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Qwen request failed.";
+    appendChatMessage("error", message);
+    status.textContent = "Qwen is unavailable";
+  } finally {
+    button.disabled = false;
+    input.focus();
+  }
+}
+
+async function ingestText() {
+  const sentence = document.getElementById("ingest-input").value.trim();
+  const mode = document.getElementById("ingest-mode").value;
+  if (!sentence) return;
+  const res = await fetch("/api/ingest", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sentence, mode })
   });
   const data = await res.json();
-  document.getElementById('createMsg').innerHTML = res.ok
-    ? `<div class="msg ok"><b>CONCEPT CREATED:</b> <code>${esc(data.id)}</code> (${esc(data.canonical)}) saved to SQLite.</div>`
-    : `<div class="msg err"><b>ERROR:</b> ${esc(data.error)}</div>`;
-  await loadOverview();
-  loadConcepts();
+  if (res.ok) {
+    document.getElementById("ingest-input").value = "";
+    toast("Ingested into CRS");
+    await loadGraphData();
+  } else {
+    toast(data.error || "Ingest failed");
+  }
 }
 
-async function addEntity() {
-  const body = {
-    id: document.getElementById('eId').value.trim(),
-    concept_id: document.getElementById('eConcept').value,
-    label: document.getElementById('eLabel').value.trim(),
-  };
-  const res = await fetch('/api/entities', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  });
+async function runAction(endpoint, label) {
+  const res = await fetch(endpoint, { method: "POST" });
   const data = await res.json();
-  document.getElementById('createMsg').innerHTML = res.ok
-    ? `<div class="msg ok"><b>ENTITY CREATED:</b> <code>${esc(data.id)}</code> (instance of ${esc(data.concept_id)}) added.</div>`
-    : `<div class="msg err"><b>ERROR:</b> ${esc(data.error)}</div>`;
-  await loadOverview();
+  toast(res.ok ? `${label} complete` : (data.error || `${label} failed`));
+  await loadGraphData();
 }
 
-async function submitClaim() {
-  const body = {
-    actor: document.getElementById('wActor').value,
-    subject_id: document.getElementById('wSubj').value,
-    relation: document.getElementById('wRel').value,
-    object_value: document.getElementById('wVal').value,
-    epistemic_state: document.getElementById('wState').value,
-    polarity: document.getElementById('wPol').value,
-  };
-  const res = await fetch('/api/claims', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+document.addEventListener("DOMContentLoaded", () => {
+  const svg = document.getElementById("graph-svg");
+  svg.addEventListener("mousedown", ev => {
+    if (ev.target === svg) {
+      state.panning = true;
+      state.panStart = { x: ev.clientX - state.pan.x, y: ev.clientY - state.pan.y };
+    }
   });
-  const data = await res.json();
-  document.getElementById('writeMsg').innerHTML = res.ok
-    ? `<div class="msg ok"><b>STORED IN SQLITE:</b> <code>${esc(data.id)}</code> written by ${esc(body.actor)}.</div>`
-    : `<div class="msg err"><b>BLOCKED (${res.status}):</b> ${esc(data.error)}</div>`;
-  loadOverview();
-}
+  window.addEventListener("mousemove", ev => {
+    if (state.draggingId) {
+      const node = state.nodes.find(n => n.id === state.draggingId);
+      if (node) {
+        const rect = svg.getBoundingClientRect();
+        node.x = ((ev.clientX - rect.left) * (1200 / rect.width) - state.pan.x) / state.zoom;
+        node.y = ((ev.clientY - rect.top) * (760 / rect.height) - state.pan.y) / state.zoom;
+        renderGraph();
+      }
+    } else if (state.panning) {
+      state.pan.x = ev.clientX - state.panStart.x;
+      state.pan.y = ev.clientY - state.panStart.y;
+      renderGraph();
+    }
+  });
+  window.addEventListener("mouseup", () => {
+    state.draggingId = null;
+    state.panning = false;
+  });
 
-(async () => {
-  await loadOverview();
-  loadConcepts();
-  loadTemporal();
-})();
+  loadGraphData();
+});
